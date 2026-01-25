@@ -132,7 +132,7 @@ async def refresh_invite(startup=False):
             continue
 
         try:
-            msg = await channel.send(f"🚪 JOIN THE MAIN SERVER\n{invite.url}")
+            msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
             print(f"📤 Posted new invite in {ch_id} → {msg.id}")
             old_data[str(ch_id)] = msg.id
         except Exception as e:
@@ -151,4 +151,5 @@ async def refresh_invite(startup=False):
 # Run bot
 # ────────────────────────────────────────────────
 bot.run(TOKEN)
+
 
