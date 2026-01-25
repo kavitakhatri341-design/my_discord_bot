@@ -7,7 +7,7 @@ from flask import Flask
 # ────────────────────────────────────────────────
 # CONFIG
 # ────────────────────────────────────────────────
-TOKEN = "MTQ2NDk0Mjc4MDU0NjY4Mjk3Mw.GrcWe5.6sBg3EvSHcnnbSGnevmInicIaYDSUQjkOUIDH4"
+TOKEN = "MTQ2NDk0Mjc4MDU0NjY4Mjk3Mw.G3R8x9.sFR4A847MkrxqMO2k-qWRknL7ba5SSNsGaNgzg"
 
 MAIN_GUILD_ID = 1396058725613305939
 
@@ -138,3 +138,4 @@ async def refresh_invite(startup=False):
 # Start bot
 # ────────────────────────────────────────────────
 bot.run(TOKEN)
+
