@@ -9,7 +9,9 @@ import asyncio
 # ────────────────────────────────────────────────
 # CONFIG
 # ────────────────────────────────────────────────
-TOKEN = os.getenv("MTQ2NDk0Mjc4MDU0NjY4Mjk3Mw.GOyWsb.2iYQaicGoOQt_N8FFiijBn0bCY8c8ZnewFouvA")  # Safe token from Render environment variable
+import os
+TOKEN = os.getenv("DISCORD_TOKEN")
+  # Safe token from Render environment variable
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing!")
 
@@ -149,3 +151,4 @@ async def refresh_invite(startup=False):
 # Run bot
 # ────────────────────────────────────────────────
 bot.run(TOKEN)
+
