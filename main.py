@@ -9,9 +9,7 @@ import asyncio
 # ────────────────────────────────────────────────
 # CONFIG
 # ────────────────────────────────────────────────
-import os
 TOKEN = os.getenv("DISCORD_TOKEN")
-  # Safe token from Render environment variable
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing!")
 
@@ -31,7 +29,7 @@ POST_CHANNEL_IDS = [
 DATA_FILE = "invite_data.json"
 
 # ────────────────────────────────────────────────
-# Flask keep-alive (for Render / UptimeRobot)
+# Flask keep-alive
 # ────────────────────────────────────────────────
 app = Flask("")
 
@@ -58,12 +56,6 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"🌐 Serving {len(bot.guilds)} guilds")
 
-    main_guild = bot.get_guild(MAIN_GUILD_ID)
-    if main_guild:
-        print(f"🛡 Main guild: {main_guild.name} (ID: {main_guild.id})")
-    else:
-        print(f"⚠ ERROR: Main guild {MAIN_GUILD_ID} not found")
-
     print("🔄 Starting invite refresh...")
     await refresh_invite(startup=True)
 
@@ -73,19 +65,19 @@ async def on_ready():
 @tasks.loop(minutes=30)
 async def refresh_invite(startup=False):
     old_data = {}
-    if not startup and os.path.exists(DATA_FILE):
+
+    if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 old_data = json.load(f)
-        except Exception as e:
-            print(f"⚠ Failed to read {DATA_FILE}: {e} → treating as fresh start")
+        except:
+            old_data = {}
 
     guild = bot.get_guild(MAIN_GUILD_ID)
     if not guild:
         print("⚠ Main guild not found")
         return
 
-    # Find a channel with invite permission
     invite_channel = None
     for ch in guild.text_channels:
         if ch.permissions_for(guild.me).create_instant_invite:
@@ -93,39 +85,48 @@ async def refresh_invite(startup=False):
             break
 
     if not invite_channel:
-        print("⚠ No channel found with create_instant_invite permission")
+        print("⚠ No channel with invite permission")
         return
 
-    # Delete ALL previous messages in the target channels
+    # ────────────────────────────────────────────────
+    # DELETE ONLY PREVIOUS BOT MESSAGE (RATE SAFE)
+    # ────────────────────────────────────────────────
     for ch_id in POST_CHANNEL_IDS:
         channel = bot.get_channel(ch_id)
         if not channel:
-            print(f"⚠ Channel {ch_id} not found")
             continue
 
-        try:
-            async for msg in channel.history(limit=None):
+        old_msg_id = old_data.get(str(ch_id))
+        if old_msg_id:
+            try:
+                msg = await channel.fetch_message(old_msg_id)
                 await msg.delete()
-            print(f"🗑 Cleared all messages in {ch_id}")
-        except discord.Forbidden:
-            print(f"⚠ No permission to delete messages in {ch_id}")
-        except Exception as e:
-            print(f"⚠ Failed to clear messages in {ch_id}: {e}")
+                await asyncio.sleep(1)  # small delay = safe
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                print(f"⚠ Failed to delete old message in {ch_id}: {e}")
 
-    # Create a fresh invite
+    # ────────────────────────────────────────────────
+    # CREATE NEW INVITE
+    # ────────────────────────────────────────────────
     try:
         invite = await invite_channel.create_invite(
-            max_age=1800,  # 30 minutes
+            max_age=1800,
             max_uses=0,
             unique=True,
             reason="Periodic public invite refresh"
         )
-        print(f"🔗 New invite created: {invite.url}")
+        print(f"🔗 New invite: {invite.url}")
     except Exception as e:
         print(f"⚠ Failed to create invite: {e}")
         return
 
-    # Send new invite to all channels
+    # ────────────────────────────────────────────────
+    # POST NEW INVITE
+    # ────────────────────────────────────────────────
+    new_data = {}
+
     for ch_id in POST_CHANNEL_IDS:
         channel = bot.get_channel(ch_id)
         if not channel:
@@ -133,23 +134,21 @@ async def refresh_invite(startup=False):
 
         try:
             msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
-            print(f"📤 Posted new invite in {ch_id} → {msg.id}")
-            old_data[str(ch_id)] = msg.id
+            new_data[str(ch_id)] = msg.id
+            await asyncio.sleep(1)
         except Exception as e:
             print(f"⚠ Failed to send message to {ch_id}: {e}")
 
-    # Save last message IDs for reference (optional)
-    if old_data:
-        try:
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(old_data, f, indent=2)
-            print("💾 Saved message IDs")
-        except Exception as e:
-            print(f"⚠ Failed to save {DATA_FILE}: {e}")
+    # ────────────────────────────────────────────────
+    # SAVE MESSAGE IDS
+    # ────────────────────────────────────────────────
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(new_data, f, indent=2)
+    except Exception as e:
+        print(f"⚠ Failed to save data: {e}")
 
 # ────────────────────────────────────────────────
-# Run bot
+# RUN
 # ────────────────────────────────────────────────
 bot.run(TOKEN)
-
-
