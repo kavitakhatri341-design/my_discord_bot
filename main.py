@@ -5,7 +5,7 @@ import threading
 from flask import Flask
 import os
 import asyncio
-import traceback  # <-- for crash logging
+import traceback  # for crash logging
 
 # ────────────────────────────────────────────────
 # CONFIG
@@ -39,7 +39,8 @@ def home():
     return "Bot is running!"
 
 def run_flask():
-    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+    port = int(os.getenv("PORT", 8080))  # dynamic port for Render
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 threading.Thread(target=run_flask, daemon=True).start()
 
@@ -89,7 +90,7 @@ async def refresh_invite():
         print("⚠ No invite permission")
         return
 
-    # CREATE NEW INVITE (30 min lifetime)
+    # CREATE NEW INVITE (expires in 30 min)
     try:
         invite = await invite_channel.create_invite(
             max_age=1800,
@@ -144,6 +145,5 @@ try:
 except Exception:
     print("❌ Bot crashed with the following traceback:")
     traceback.print_exc()
-    # Keep the process alive for Render to show logs
     import sys
     sys.exit(1)
