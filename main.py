@@ -90,7 +90,7 @@ async def refresh_invite():
         print("⚠ No invite permission")
         return
 
-    # CREATE NEW INVITE (expires in 30 min)
+    # CREATE NEW INVITE (expires in 1 hour)
     try:
         invite = await invite_channel.create_invite(
             max_age=3600,
@@ -147,3 +147,4 @@ except Exception:
     traceback.print_exc()
     import sys
     sys.exit(1)
+
