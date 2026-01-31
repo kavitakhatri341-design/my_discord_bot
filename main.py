@@ -5,8 +5,7 @@ import threading
 from flask import Flask
 import os
 import asyncio
-import traceback
-import random
+import traceback  # for crash logging
 
 # ────────────────────────────────────────────────
 # CONFIG
@@ -40,7 +39,7 @@ def home():
     return "Bot is running!"
 
 def run_flask():
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 8080))  # dynamic port for Render
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 threading.Thread(target=run_flask, daemon=True).start()
@@ -61,9 +60,9 @@ async def on_ready():
         refresh_invite.start()
 
 # ────────────────────────────────────────────────
-# INVITE REFRESH LOOP (SAFE UNIQUE MODE)
+# SAFE INVITE REFRESH LOOP
 # ────────────────────────────────────────────────
-@tasks.loop(hours=6)
+@tasks.loop(hours=1)
 async def refresh_invite():
     data = {}
 
@@ -91,21 +90,15 @@ async def refresh_invite():
         print("⚠ No invite permission")
         return
 
-    # jitter to avoid hitting the same Discord window
-    await asyncio.sleep(random.randint(0, 180))
-
-    # CREATE UNIQUE INVITE (6 HOURS)
+    # CREATE NEW INVITE (expires in 30 min)
     try:
         invite = await invite_channel.create_invite(
-            max_age=21600,  # 6 hours
+            max_age=3600,
             max_uses=0,
             unique=True,
-            reason="6h rotating invite"
+            reason="Periodic invite refresh"
         )
-    except discord.HTTPException as e:
-        if e.status == 429:
-            print("⛔ Invite rate-limited — skipping this cycle")
-            return
+    except Exception as e:
         print(f"⚠ Invite creation failed: {e}")
         return
 
@@ -126,16 +119,14 @@ async def refresh_invite():
                 msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
 
             new_message_ids[str(ch_id)] = msg.id
-            await asyncio.sleep(3)
-
+            await asyncio.sleep(3)  # RATE SAFE
         except discord.NotFound:
             msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
             new_message_ids[str(ch_id)] = msg.id
             await asyncio.sleep(3)
-
         except discord.HTTPException as e:
             if e.status == 429:
-                print("⏳ Message rate-limited — pausing")
+                print("⏳ Rate limited — backing off")
                 await asyncio.sleep(60)
             else:
                 print(f"⚠ HTTP error in {ch_id}: {e}")
