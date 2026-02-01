@@ -5,11 +5,9 @@ import threading
 from flask import Flask
 import os
 import asyncio
-import traceback  # for crash logging
+import traceback
 
-# ────────────────────────────────────────────────
-# CONFIG
-# ────────────────────────────────────────────────
+# ───────────────── CONFIG ─────────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing!")
@@ -29,9 +27,7 @@ POST_CHANNEL_IDS = [
 
 DATA_FILE = "invite_data.json"
 
-# ────────────────────────────────────────────────
-# Flask keep-alive
-# ────────────────────────────────────────────────
+# ─────────────── Flask keep-alive ───────────────
 app = Flask("")
 
 @app.route("/")
@@ -39,17 +35,14 @@ def home():
     return "Bot is running!"
 
 def run_flask():
-    port = int(os.getenv("PORT", 8080))  # dynamic port for Render
+    port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# ────────────────────────────────────────────────
-# Discord bot
-# ────────────────────────────────────────────────
+# ─────────────── Discord bot ───────────────
 intents = discord.Intents.default()
 intents.message_content = True
-intents.messages = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -59,13 +52,10 @@ async def on_ready():
     if not refresh_invite.is_running():
         refresh_invite.start()
 
-# ────────────────────────────────────────────────
-# SAFE INVITE REFRESH LOOP
-# ────────────────────────────────────────────────
+# ─────────────── INVITE LOOP ───────────────
 @tasks.loop(hours=1)
 async def refresh_invite():
     data = {}
-
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -77,74 +67,86 @@ async def refresh_invite():
 
     guild = bot.get_guild(MAIN_GUILD_ID)
     if not guild:
-        print("⚠ Guild not found")
+        print("❌ Guild not found")
         return
+
+    me = guild.get_member(bot.user.id)
 
     invite_channel = None
     for ch in guild.text_channels:
-        if ch.permissions_for(guild.me).create_instant_invite:
+        if ch.permissions_for(me).create_instant_invite:
             invite_channel = ch
             break
 
     if not invite_channel:
-        print("⚠ No invite permission")
+        print("❌ No channel with invite permission")
         return
 
-    # CREATE NEW INVITE (expires in 1 hour)
     try:
         invite = await invite_channel.create_invite(
             max_age=3600,
             max_uses=0,
             unique=True,
-            reason="Periodic invite refresh"
+            reason="Hourly invite refresh"
         )
     except Exception as e:
-        print(f"⚠ Invite creation failed: {e}")
+        print(f"❌ Invite creation failed: {e}")
         return
 
     new_message_ids = {}
 
     for ch_id in POST_CHANNEL_IDS:
-        channel = bot.get_channel(ch_id)
-        if not channel:
-            continue
+        while True:
+            channel = bot.get_channel(ch_id)
+            if not channel:
+                print(f"❌ Channel not found: {ch_id}")
+                break
 
-        old_msg_id = message_ids.get(str(ch_id))
+            old_msg_id = message_ids.get(str(ch_id))
 
-        try:
-            if old_msg_id:
-                msg = await channel.fetch_message(old_msg_id)
-                await msg.edit(content=f"JOIN THE MAIN SERVER\n{invite.url}")
-            else:
+            try:
+                if old_msg_id:
+                    msg = await channel.fetch_message(old_msg_id)
+                    await msg.edit(content=f"JOIN THE MAIN SERVER\n{invite.url}")
+                else:
+                    msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
+
+                new_message_ids[str(ch_id)] = msg.id
+                await asyncio.sleep(3)
+                break  # success
+
+            except discord.NotFound:
                 msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
+                new_message_ids[str(ch_id)] = msg.id
+                await asyncio.sleep(3)
+                break
 
-            new_message_ids[str(ch_id)] = msg.id
-            await asyncio.sleep(3)  # RATE SAFE
-        except discord.NotFound:
-            msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
-            new_message_ids[str(ch_id)] = msg.id
-            await asyncio.sleep(3)
-        except discord.HTTPException as e:
-            if e.status == 429:
-                print("⏳ Rate limited — backing off")
-                await asyncio.sleep(60)
-            else:
-                print(f"⚠ HTTP error in {ch_id}: {e}")
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    print(f"⏳ Rate limited in {ch_id}, retrying…")
+                    await asyncio.sleep(65)
+                    continue
+                else:
+                    print(f"❌ HTTP error in {ch_id}: {e}")
+                    break
+
+            except Exception as e:
+                print(f"❌ Unexpected error in {ch_id}: {e}")
+                break
 
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump({"messages": new_message_ids}, f, indent=2)
     except Exception as e:
-        print(f"⚠ Failed to save data: {e}")
+        print(f"❌ Failed to save data: {e}")
 
-# ────────────────────────────────────────────────
-# RUN WITH CRASH LOGGING
-# ────────────────────────────────────────────────
+@refresh_invite.before_loop
+async def before_refresh():
+    await bot.wait_until_ready()
+
+# ─────────────── RUN ───────────────
 try:
     bot.run(TOKEN)
 except Exception:
-    print("❌ Bot crashed with the following traceback:")
+    print("❌ Bot crashed:")
     traceback.print_exc()
-    import sys
-    sys.exit(1)
-
