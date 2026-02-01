@@ -7,7 +7,7 @@ import os
 import asyncio
 import traceback
 
-# ───────────────── CONFIG ─────────────────
+# ───────────── CONFIG ─────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing!")
@@ -27,7 +27,7 @@ POST_CHANNEL_IDS = [
 
 DATA_FILE = "invite_data.json"
 
-# ─────────────── Flask keep-alive ───────────────
+# ───────────── Flask keep-alive ─────────────
 app = Flask("")
 
 @app.route("/")
@@ -40,7 +40,7 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# ─────────────── Discord bot ───────────────
+# ───────────── Discord bot ─────────────
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -52,9 +52,10 @@ async def on_ready():
     if not refresh_invite.is_running():
         refresh_invite.start()
 
-# ─────────────── INVITE LOOP ───────────────
+# ───────────── INVITE LOOP ─────────────
 @tasks.loop(hours=1)
 async def refresh_invite():
+    # Load previous message IDs
     data = {}
     if os.path.exists(DATA_FILE):
         try:
@@ -62,26 +63,26 @@ async def refresh_invite():
                 data = json.load(f)
         except:
             data = {}
-
     message_ids = data.get("messages", {})
 
+    # Get guild and bot member
     guild = bot.get_guild(MAIN_GUILD_ID)
     if not guild:
         print("❌ Guild not found")
         return
-
     me = guild.get_member(bot.user.id)
 
+    # Find a channel where bot can create invite
     invite_channel = None
     for ch in guild.text_channels:
         if ch.permissions_for(me).create_instant_invite:
             invite_channel = ch
             break
-
     if not invite_channel:
         print("❌ No channel with invite permission")
         return
 
+    # Create a new invite (1 hour)
     try:
         invite = await invite_channel.create_invite(
             max_age=3600,
@@ -95,12 +96,13 @@ async def refresh_invite():
 
     new_message_ids = {}
 
-    for ch_id in POST_CHANNEL_IDS:
+    async def update_channel(ch_id):
+        """Update a single channel with retries on 429"""
         while True:
             channel = bot.get_channel(ch_id)
             if not channel:
                 print(f"❌ Channel not found: {ch_id}")
-                break
+                return
 
             old_msg_id = message_ids.get(str(ch_id))
 
@@ -112,28 +114,32 @@ async def refresh_invite():
                     msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
 
                 new_message_ids[str(ch_id)] = msg.id
-                await asyncio.sleep(3)
-                break  # success
+                await asyncio.sleep(1)  # gentle pause
+                return  # success
 
             except discord.NotFound:
                 msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
                 new_message_ids[str(ch_id)] = msg.id
-                await asyncio.sleep(3)
-                break
+                await asyncio.sleep(1)
+                return
 
             except discord.HTTPException as e:
                 if e.status == 429:
                     print(f"⏳ Rate limited in {ch_id}, retrying…")
                     await asyncio.sleep(65)
-                    continue
+                    continue  # retry same channel
                 else:
                     print(f"❌ HTTP error in {ch_id}: {e}")
-                    break
+                    return
 
             except Exception as e:
                 print(f"❌ Unexpected error in {ch_id}: {e}")
-                break
+                return
 
+    # Update all channels in parallel
+    await asyncio.gather(*(update_channel(ch_id) for ch_id in POST_CHANNEL_IDS))
+
+    # Save message IDs
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump({"messages": new_message_ids}, f, indent=2)
@@ -144,7 +150,7 @@ async def refresh_invite():
 async def before_refresh():
     await bot.wait_until_ready()
 
-# ─────────────── RUN ───────────────
+# ───────────── RUN BOT ─────────────
 try:
     bot.run(TOKEN)
 except Exception:
