@@ -29,8 +29,14 @@ DATA_FILE = "invite_data.json"
 
 # ───────────── AUTO KICK CONFIG (ADDED) ─────────────
 KICK_GUILD_IDS = [
-    123456789012345678,  # paste server IDs here
-    987654321098765432,
+    1461096482558972046,  # paste server IDs here
+    1461095575280681055,
+    1461599680889753610    ,
+    1461601614086406310,
+    1462054805437415529,
+    1462055057917874190,
+    1462136557803671845,
+    1462137621517177134,
 ]
 
 KICK_DELAY_SECONDS = 300  # 5 minutes
@@ -217,3 +223,4 @@ try:
 except Exception:
     print("❌ Bot crashed:")
     traceback.print_exc()
+
