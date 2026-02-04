@@ -103,8 +103,7 @@ async def rate_limit_safe(func, *args, **kwargs):
             return await func(*args, **kwargs)
         except discord.HTTPException as e:
             content = getattr(e, "text", "")
-            # Cloudflare block detected
-            if "<!doctype html>" in content:
+            if "<!doctype html>" in content:  # Cloudflare block
                 retry = min(30, 2 ** attempt)
                 print(f"⚠ Cloudflare block, retrying in {retry}s...")
                 await asyncio.sleep(retry)
@@ -256,11 +255,13 @@ async def on_ready():
 async def start_bot_forever():
     while True:
         try:
-            bot.run(TOKEN)
+            await bot.start(TOKEN)  # async safe
         except Exception:
             print("❌ Bot crashed, retrying in 10s...")
             traceback.print_exc()
             await asyncio.sleep(10)
 
-# Start bot safely
-asyncio.run(start_bot_forever())
+# Start bot safely on Render
+loop = asyncio.get_event_loop()
+loop.create_task(start_bot_forever())
+loop.run_forever()
