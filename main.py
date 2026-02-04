@@ -94,9 +94,13 @@ if os.path.exists(KICK_DATA_FILE):
         except:
             kick_data = {}
 
+# ───────────── QUEUES ─────────────
+kick_queue = asyncio.Queue()
+invite_queue = asyncio.Queue()
+
 # ───────────── Helpers ─────────────
 async def rate_limit_safe(func, *args, **kwargs):
-    """Automatically retries API calls respecting rate limits."""
+    """Retries API calls automatically respecting rate limits."""
     for _ in range(10):
         try:
             return await func(*args, **kwargs)
@@ -109,7 +113,6 @@ async def rate_limit_safe(func, *args, **kwargs):
     return None
 
 async def safe_kick(member):
-    """Kick a member respecting rate limits."""
     return await rate_limit_safe(member.kick, reason="Auto kick every 5 minutes")
 
 async def safe_send(channel, content=None, fetch_msg_id=None):
@@ -125,10 +128,9 @@ async def safe_send(channel, content=None, fetch_msg_id=None):
     return await rate_limit_safe(channel.send, content=content)
 
 async def schedule_kick(user_id, guild_id, channel_id, first_join_time):
-    """Schedule a kick with exact timing, rate-limit safe."""
+    """Schedule a kick by adding it to the queue after the delay."""
     remaining = max(0, KICK_DELAY_SECONDS - (time.time() - first_join_time))
     await asyncio.sleep(remaining)
-
     guild = bot.get_guild(guild_id)
     if not guild:
         return
@@ -140,22 +142,37 @@ async def schedule_kick(user_id, guild_id, channel_id, first_join_time):
                 with open(KICK_DATA_FILE, "w") as f:
                     json.dump(kick_data, f, indent=2)
             return
-        if await safe_kick(member):
-            notify_channel = guild.get_channel(channel_id)
-            if notify_channel:
-                await safe_send(notify_channel, f"User <@{user_id}> has been kicked from the server.")
+        await kick_queue.put((member, channel_id))
 
-    async with kick_lock:
-        kick_data.pop(f"{guild_id}-{user_id}", None)
-        with open(KICK_DATA_FILE, "w") as f:
-            json.dump(kick_data, f, indent=2)
+# ───────────── Workers ─────────────
+async def kick_worker():
+    """Processes the kick queue one member at a time safely."""
+    while True:
+        member, channel_id = await kick_queue.get()
+        await safe_kick(member)
+        notify_channel = bot.get_channel(channel_id)
+        if notify_channel:
+            await safe_send(notify_channel, f"User <@{member.id}> has been kicked")
+        async with kick_lock:
+            key = f"{member.guild.id}-{member.id}"
+            kick_data.pop(key, None)
+            with open(KICK_DATA_FILE, "w") as f:
+                json.dump(kick_data, f, indent=2)
+        kick_queue.task_done()
 
-async def schedule_existing_kicks():
-    async with kick_lock:
-        for key, info in kick_data.items():
-            asyncio.create_task(schedule_kick(
-                info["user_id"], info["guild_id"], info["channel_id"], info["first_join"]
-            ))
+async def invite_worker():
+    """Processes the invite queue sequentially to prevent 429."""
+    while True:
+        channel, content, old_msg_id = await invite_queue.get()
+        await safe_send(channel, content, fetch_msg_id=old_msg_id)
+        invite_queue.task_done()
+
+# Start workers
+async def start_workers():
+    for _ in range(2):
+        asyncio.create_task(kick_worker())
+    for _ in range(2):
+        asyncio.create_task(invite_worker())
 
 # ───────────── Periodic scan ─────────────
 @tasks.loop(seconds=30)
@@ -193,8 +210,8 @@ async def refresh_invite():
                 data = json.load(f)
         except:
             data = {}
-
     message_ids = data.get("messages", {})
+
     guild = bot.get_guild(MAIN_GUILD_ID)
     if not guild:
         print("❌ Guild not found")
@@ -212,21 +229,25 @@ async def refresh_invite():
         print(f"❌ Invite creation failed: {e}")
         return
 
-    new_message_ids = {}
     for ch_id in POST_CHANNEL_IDS:
         channel = bot.get_channel(ch_id)
         if not channel:
             continue
         old_msg_id = message_ids.get(str(ch_id))
-        msg = await safe_send(channel, content=f"JOIN THE MAIN SERVER\n{invite.url}", fetch_msg_id=old_msg_id)
-        if msg:
-            new_message_ids[str(ch_id)] = msg.id
+        await invite_queue.put((channel, f"JOIN THE MAIN SERVER\n{invite.url}", old_msg_id))
 
-    try:
+    # Save new message IDs after all queue processed
+    async def save_ids():
+        while not invite_queue.empty():
+            await asyncio.sleep(0.1)
+        new_message_ids = {}
+        for ch_id in POST_CHANNEL_IDS:
+            channel = bot.get_channel(ch_id)
+            if channel and channel.last_message_id:
+                new_message_ids[str(ch_id)] = channel.last_message_id
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump({"messages": new_message_ids}, f, indent=2)
-    except Exception as e:
-        print(f"❌ Failed to save data: {e}")
+    asyncio.create_task(save_ids())
 
 @refresh_invite.before_loop
 async def before_refresh():
@@ -236,7 +257,10 @@ async def before_refresh():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    await schedule_existing_kicks()
+    await start_workers()
+    async with kick_lock:
+        for key, info in kick_data.items():
+            asyncio.create_task(schedule_kick(info["user_id"], info["guild_id"], info["channel_id"], info["first_join"]))
     if not scan_servers_for_members.is_running():
         scan_servers_for_members.start()
     if not refresh_invite.is_running():
