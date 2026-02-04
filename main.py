@@ -7,13 +7,13 @@ import os
 import asyncio
 import traceback
 import time
+import random
 
 # ───────────── CONFIG ─────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing!")
 
-# ───────────── SERVER & CHANNEL CONFIG ─────────────
 MAIN_GUILD_ID = 1396058725613305939
 
 POST_CHANNEL_IDS = [
@@ -29,7 +29,6 @@ POST_CHANNEL_IDS = [
 
 DATA_FILE = "invite_data.json"
 
-# Kick servers
 KICK_GUILD_IDS = [
     1461096482558972046,
     1461095575280681055,
@@ -41,7 +40,6 @@ KICK_GUILD_IDS = [
     1462137621517177134,
 ]
 
-# Kick notify channels per server
 KICK_NOTIFY_CHANNELS = {
     1461096482558972046: 1461096483825914143,
     1461095575280681055: 1461095577231298820,
@@ -54,9 +52,7 @@ KICK_NOTIFY_CHANNELS = {
 }
 
 KICK_DELAY_SECONDS = 300  # 5 minutes
-KICK_DATA_FILE = "kick_data.json"
 
-# Safe role IDs (members with any of these are ignored)
 SAFE_ROLE_IDS = [
     1461096482558972048,
     1461095575280681057,
@@ -87,69 +83,63 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ───────────── Kick system storage ─────────────
 kick_lock = asyncio.Lock()
 kick_data = {}
 
-# Load kick data on startup
-if os.path.exists(KICK_DATA_FILE):
-    with open(KICK_DATA_FILE, "r") as f:
+# Load kick data
+if os.path.exists("kick_data.json"):
+    with open("kick_data.json", "r") as f:
         try:
             kick_data = json.load(f)
         except:
             kick_data = {}
 
-# ───────────── Helper: Schedule per-user per-server restart-proof kick ─────────────
+# ───────────── Helpers ─────────────
+async def safe_kick(member):
+    """Kick a member safely with rate-limit handling."""
+    for _ in range(5):
+        try:
+            await member.kick(reason="Auto kick every 5 minutes")
+            return True
+        except discord.HTTPException as e:
+            if e.status == 429:
+                retry_after = getattr(e, "retry_after", 5)
+                await asyncio.sleep(retry_after + random.uniform(0, 1))
+            else:
+                return False
+    return False
+
 async def schedule_kick(user_id, guild_id, channel_id, first_join_time):
     now = time.time()
-    elapsed = now - first_join_time
-    remaining = KICK_DELAY_SECONDS - elapsed
-    if remaining < 0:
-        remaining = 0  # kick immediately if time passed
-
+    remaining = max(0, KICK_DELAY_SECONDS - (now - first_join_time))
     await asyncio.sleep(remaining)
 
     guild = bot.get_guild(guild_id)
     if not guild:
         return
-
     member = guild.get_member(int(user_id))
     if member and not member.bot:
-        # Skip if member has a safe role
         if any(role.id in SAFE_ROLE_IDS for role in member.roles):
-            # Remove from kick_data to allow future rejoin scheduling
             async with kick_lock:
                 key = f"{guild_id}-{user_id}"
-                if key in kick_data:
-                    del kick_data[key]
-                    with open(KICK_DATA_FILE, "w") as f:
-                        json.dump(kick_data, f, indent=2)
+                kick_data.pop(key, None)
+                with open("kick_data.json", "w") as f:
+                    json.dump(kick_data, f, indent=2)
             return
-
-        try:
-            await member.kick(reason="Auto kick every 5 minutes")
-        except discord.HTTPException as e:
-            if e.status == 429:
-                retry_after = getattr(e, "retry_after", 5)
-                await asyncio.sleep(retry_after)
+        if await safe_kick(member):
+            notify_channel = guild.get_channel(channel_id)
+            if notify_channel:
                 try:
-                    await member.kick(reason="Auto kick every 5 minutes")
+                    await notify_channel.send(f"User <@{user_id}> has been kicked from the server.")
+                    await asyncio.sleep(1)  # small delay to avoid 429
                 except:
                     pass
-
-        notify_channel = guild.get_channel(channel_id)
-        if notify_channel:
-            await notify_channel.send(f"User <@{user_id}> has been kicked from the server.")
-
-    # Remove from kick_data after kick
     async with kick_lock:
         key = f"{guild_id}-{user_id}"
-        if key in kick_data:
-            del kick_data[key]
-            with open(KICK_DATA_FILE, "w") as f:
-                json.dump(kick_data, f, indent=2)
+        kick_data.pop(key, None)
+        with open("kick_data.json", "w") as f:
+            json.dump(kick_data, f, indent=2)
 
-# ───────────── Startup: Schedule kicks for existing users ─────────────
 async def schedule_existing_kicks():
     async with kick_lock:
         for key, info in kick_data.items():
@@ -157,7 +147,7 @@ async def schedule_existing_kicks():
                 info["user_id"], info["guild_id"], info["channel_id"], info["first_join"]
             ))
 
-# ───────────── Periodic scan to add new users ─────────────
+# ───────────── Periodic scan ─────────────
 @tasks.loop(seconds=30)
 async def scan_servers_for_members():
     async with kick_lock:
@@ -172,7 +162,7 @@ async def scan_servers_for_members():
                 if member.bot:
                     continue
                 if any(role.id in SAFE_ROLE_IDS for role in member.roles):
-                    continue  # skip safe roles
+                    continue
                 key = f"{guild_id}-{member.id}"
                 if key not in kick_data:
                     kick_data[key] = {
@@ -181,11 +171,12 @@ async def scan_servers_for_members():
                         "channel_id": channel_id,
                         "user_id": str(member.id)
                     }
-                    with open(KICK_DATA_FILE, "w") as f:
+                    with open("kick_data.json", "w") as f:
                         json.dump(kick_data, f, indent=2)
                     asyncio.create_task(schedule_kick(
                         str(member.id), guild_id, channel_id, kick_data[key]["first_join"]
                     ))
+                    await asyncio.sleep(1)  # small delay to avoid 429
 
 # ───────────── Invite system ─────────────
 @tasks.loop(hours=1)
@@ -197,14 +188,14 @@ async def refresh_invite():
                 data = json.load(f)
         except:
             data = {}
-    message_ids = data.get("messages", {})
 
+    message_ids = data.get("messages", {})
     guild = bot.get_guild(MAIN_GUILD_ID)
     if not guild:
         print("❌ Guild not found")
         return
-    me = guild.get_member(bot.user.id)
 
+    me = guild.get_member(bot.user.id)
     invite_channel = None
     for ch in guild.text_channels:
         if ch.permissions_for(me).create_instant_invite:
@@ -227,14 +218,11 @@ async def refresh_invite():
 
     new_message_ids = {}
 
-    async def update_channel(ch_id):
+    for ch_id in POST_CHANNEL_IDS:
         channel = bot.get_channel(ch_id)
         if not channel:
-            print(f"❌ Channel not found: {ch_id}")
-            return
-
+            continue
         old_msg_id = message_ids.get(str(ch_id))
-
         try:
             if old_msg_id:
                 msg = await channel.fetch_message(old_msg_id)
@@ -242,16 +230,13 @@ async def refresh_invite():
             else:
                 msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
             new_message_ids[str(ch_id)] = msg.id
-        except discord.NotFound:
-            msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
-            new_message_ids[str(ch_id)] = msg.id
         except discord.HTTPException as e:
             if e.status == 429:
-                await asyncio.sleep(65)
+                retry_after = getattr(e, "retry_after", 5)
+                await asyncio.sleep(retry_after + random.uniform(0, 1))
             else:
-                return
-
-    await asyncio.gather(*(update_channel(ch_id) for ch_id in POST_CHANNEL_IDS))
+                continue
+        await asyncio.sleep(1)  # small delay to avoid 429
 
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -267,7 +252,7 @@ async def before_refresh():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    await schedule_existing_kicks()  # schedule kicks for existing users
+    await schedule_existing_kicks()
     if not scan_servers_for_members.is_running():
         scan_servers_for_members.start()
     if not refresh_invite.is_running():
@@ -279,4 +264,3 @@ try:
 except Exception:
     print("❌ Bot crashed:")
     traceback.print_exc()
-
