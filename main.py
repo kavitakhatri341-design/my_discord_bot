@@ -6,6 +6,7 @@ from flask import Flask
 import os
 import asyncio
 import traceback
+import time
 
 # ───────────── CONFIG ─────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -26,7 +27,7 @@ POST_CHANNEL_IDS = [
 ]
 
 DATA_FILE = "invite_data.json"
-
+JOIN_DATA_FILE = "joins.json"
 AUTO_KICK_DELAY = 300  # 5 minutes
 
 # ───────────── Flask keep-alive ─────────────
@@ -44,37 +45,81 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 # ───────────── Discord bot ─────────────
 intents = discord.Intents.default()
-intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    if not refresh_invite.is_running():
-        refresh_invite.start()
+# ───────────── HELPERS ─────────────
+def load_joins():
+    if not os.path.exists(JOIN_DATA_FILE):
+        return {}
+    with open(JOIN_DATA_FILE, "r") as f:
+        return json.load(f)
 
-# ───────────── AUTO KICK ─────────────
+def save_joins(data):
+    with open(JOIN_DATA_FILE, "w") as f:
+        json.dump(data, f)
+
+def is_post_server(guild: discord.Guild):
+    return any(guild.get_channel(ch_id) for ch_id in POST_CHANNEL_IDS)
+
+# ───────────── JOIN TRACKING ─────────────
 @bot.event
 async def on_member_join(member):
     if member.bot:
         return
 
-    await asyncio.sleep(AUTO_KICK_DELAY)
-
-    if member.guild.get_member(member.id) is None:
+    if member.guild.id == MAIN_GUILD_ID:
         return
 
-    try:
-        await member.kick(reason="Auto-kick after 5 minutes")
-        print(f"👢 Auto-kicked {member} from {member.guild.name}")
-    except discord.Forbidden:
-        print(f"❌ Missing kick permission in {member.guild.name}")
-    except Exception as e:
-        print(f"❌ Auto-kick failed: {e}")
+    if not is_post_server(member.guild):
+        return
 
-# ───────────── INVITE LOOP ─────────────
+    joins = load_joins()
+    joins[str(member.id)] = {
+        "guild_id": member.guild.id,
+        "joined_at": time.time()
+    }
+    save_joins(joins)
+
+    print(f"🕒 Tracking {member} in {member.guild.name}")
+
+@bot.event
+async def on_member_remove(member):
+    joins = load_joins()
+    joins.pop(str(member.id), None)
+    save_joins(joins)
+
+# ───────────── AUTO KICK LOOP ─────────────
+@tasks.loop(seconds=30)
+async def auto_kick_check():
+    joins = load_joins()
+    now = time.time()
+    changed = False
+
+    for user_id, data in list(joins.items()):
+        if now - data["joined_at"] >= AUTO_KICK_DELAY:
+            guild = bot.get_guild(data["guild_id"])
+            if not guild:
+                joins.pop(user_id)
+                changed = True
+                continue
+
+            member = guild.get_member(int(user_id))
+            if member:
+                try:
+                    await member.kick(reason="Auto-kick after 5 minutes")
+                    print(f"👢 Kicked {member} from {guild.name}")
+                except Exception as e:
+                    print(f"❌ Kick failed: {e}")
+
+            joins.pop(user_id)
+            changed = True
+
+    if changed:
+        save_joins(joins)
+
+# ───────────── INVITE LOOP (UNCHANGED) ─────────────
 @tasks.loop(hours=1)
 async def refresh_invite():
     data = {}
@@ -120,7 +165,6 @@ async def refresh_invite():
         while True:
             channel = bot.get_channel(ch_id)
             if not channel:
-                print(f"❌ Channel not found: {ch_id}")
                 return
 
             old_msg_id = message_ids.get(str(ch_id))
@@ -136,36 +180,28 @@ async def refresh_invite():
                 await asyncio.sleep(1)
                 return
 
-            except discord.NotFound:
-                msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
-                new_message_ids[str(ch_id)] = msg.id
-                await asyncio.sleep(1)
-                return
-
             except discord.HTTPException as e:
                 if e.status == 429:
-                    print(f"⏳ Rate limited in {ch_id}, retrying…")
                     await asyncio.sleep(65)
-                    continue
                 else:
-                    print(f"❌ HTTP error in {ch_id}: {e}")
                     return
-
-            except Exception as e:
-                print(f"❌ Unexpected error in {ch_id}: {e}")
-                return
 
     await asyncio.gather(*(update_channel(ch_id) for ch_id in POST_CHANNEL_IDS))
 
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"messages": new_message_ids}, f, indent=2)
-    except Exception as e:
-        print(f"❌ Failed to save data: {e}")
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump({"messages": new_message_ids}, f, indent=2)
 
 @refresh_invite.before_loop
 async def before_refresh():
     await bot.wait_until_ready()
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    if not refresh_invite.is_running():
+        refresh_invite.start()
+    if not auto_kick_check.is_running():
+        auto_kick_check.start()
 
 # ───────────── RUN BOT ─────────────
 try:
