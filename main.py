@@ -6,7 +6,6 @@ from flask import Flask
 import os
 import asyncio
 import traceback
-import time
 
 # ───────────── CONFIG ─────────────
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -27,8 +26,15 @@ POST_CHANNEL_IDS = [
 ]
 
 DATA_FILE = "invite_data.json"
-JOIN_DATA_FILE = "joins.json"
-AUTO_KICK_DELAY = 300  # 5 minutes
+
+# ───────────── AUTO KICK CONFIG (ADDED) ─────────────
+KICK_GUILD_IDS = [
+    123456789012345678,  # paste server IDs here
+    987654321098765432,
+]
+
+KICK_DELAY_SECONDS = 300  # 5 minutes
+KICK_DATA_FILE = "kick_data.json"
 
 # ───────────── Flask keep-alive ─────────────
 app = Flask("")
@@ -45,81 +51,20 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 # ───────────── Discord bot ─────────────
 intents = discord.Intents.default()
+intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ───────────── HELPERS ─────────────
-def load_joins():
-    if not os.path.exists(JOIN_DATA_FILE):
-        return {}
-    with open(JOIN_DATA_FILE, "r") as f:
-        return json.load(f)
-
-def save_joins(data):
-    with open(JOIN_DATA_FILE, "w") as f:
-        json.dump(data, f)
-
-def is_post_server(guild: discord.Guild):
-    return any(guild.get_channel(ch_id) for ch_id in POST_CHANNEL_IDS)
-
-# ───────────── JOIN TRACKING ─────────────
 @bot.event
-async def on_member_join(member):
-    if member.bot:
-        return
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    if not refresh_invite.is_running():
+        refresh_invite.start()
+    if not kick_watcher.is_running():
+        kick_watcher.start()
 
-    if member.guild.id == MAIN_GUILD_ID:
-        return
-
-    if not is_post_server(member.guild):
-        return
-
-    joins = load_joins()
-    joins[str(member.id)] = {
-        "guild_id": member.guild.id,
-        "joined_at": time.time()
-    }
-    save_joins(joins)
-
-    print(f"🕒 Tracking {member} in {member.guild.name}")
-
-@bot.event
-async def on_member_remove(member):
-    joins = load_joins()
-    joins.pop(str(member.id), None)
-    save_joins(joins)
-
-# ───────────── AUTO KICK LOOP ─────────────
-@tasks.loop(seconds=30)
-async def auto_kick_check():
-    joins = load_joins()
-    now = time.time()
-    changed = False
-
-    for user_id, data in list(joins.items()):
-        if now - data["joined_at"] >= AUTO_KICK_DELAY:
-            guild = bot.get_guild(data["guild_id"])
-            if not guild:
-                joins.pop(user_id)
-                changed = True
-                continue
-
-            member = guild.get_member(int(user_id))
-            if member:
-                try:
-                    await member.kick(reason="Auto-kick after 5 minutes")
-                    print(f"👢 Kicked {member} from {guild.name}")
-                except Exception as e:
-                    print(f"❌ Kick failed: {e}")
-
-            joins.pop(user_id)
-            changed = True
-
-    if changed:
-        save_joins(joins)
-
-# ───────────── INVITE LOOP (UNCHANGED) ─────────────
+# ───────────── INVITE LOOP ─────────────
 @tasks.loop(hours=1)
 async def refresh_invite():
     data = {}
@@ -135,7 +80,6 @@ async def refresh_invite():
     if not guild:
         print("❌ Guild not found")
         return
-
     me = guild.get_member(bot.user.id)
 
     invite_channel = None
@@ -143,7 +87,6 @@ async def refresh_invite():
         if ch.permissions_for(me).create_instant_invite:
             invite_channel = ch
             break
-
     if not invite_channel:
         print("❌ No channel with invite permission")
         return
@@ -165,6 +108,7 @@ async def refresh_invite():
         while True:
             channel = bot.get_channel(ch_id)
             if not channel:
+                print(f"❌ Channel not found: {ch_id}")
                 return
 
             old_msg_id = message_ids.get(str(ch_id))
@@ -180,28 +124,92 @@ async def refresh_invite():
                 await asyncio.sleep(1)
                 return
 
+            except discord.NotFound:
+                msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
+                new_message_ids[str(ch_id)] = msg.id
+                await asyncio.sleep(1)
+                return
+
             except discord.HTTPException as e:
                 if e.status == 429:
                     await asyncio.sleep(65)
+                    continue
                 else:
                     return
 
+            except Exception:
+                return
+
     await asyncio.gather(*(update_channel(ch_id) for ch_id in POST_CHANNEL_IDS))
 
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump({"messages": new_message_ids}, f, indent=2)
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({"messages": new_message_ids}, f, indent=2)
+    except Exception as e:
+        print(f"❌ Failed to save data: {e}")
 
 @refresh_invite.before_loop
 async def before_refresh():
     await bot.wait_until_ready()
 
+# ───────────── AUTO KICK SYSTEM (ADDED) ─────────────
 @bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    if not refresh_invite.is_running():
-        refresh_invite.start()
-    if not auto_kick_check.is_running():
-        auto_kick_check.start()
+async def on_member_join(member):
+    if member.guild.id not in KICK_GUILD_IDS:
+        return
+
+    data = {}
+    if os.path.exists(KICK_DATA_FILE):
+        try:
+            with open(KICK_DATA_FILE, "r") as f:
+                data = json.load(f)
+        except:
+            data = {}
+
+    user_id = str(member.id)
+
+    if user_id not in data:
+        data[user_id] = {
+            "first_join": asyncio.get_event_loop().time()
+        }
+
+        with open(KICK_DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+@tasks.loop(seconds=30)
+async def kick_watcher():
+    if not os.path.exists(KICK_DATA_FILE):
+        return
+
+    try:
+        with open(KICK_DATA_FILE, "r") as f:
+            data = json.load(f)
+    except:
+        return
+
+    now = asyncio.get_event_loop().time()
+    changed = False
+
+    for user_id, info in list(data.items()):
+        if now - info["first_join"] >= KICK_DELAY_SECONDS:
+            for guild_id in KICK_GUILD_IDS:
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    continue
+
+                member = guild.get_member(int(user_id))
+                if member:
+                    try:
+                        await member.kick(reason="Auto kick after 5 minutes")
+                    except:
+                        pass
+
+            del data[user_id]
+            changed = True
+
+    if changed:
+        with open(KICK_DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2)
 
 # ───────────── RUN BOT ─────────────
 try:
