@@ -27,6 +27,8 @@ POST_CHANNEL_IDS = [
 
 DATA_FILE = "invite_data.json"
 
+AUTO_KICK_DELAY = 300  # 5 minutes
+
 # ───────────── Flask keep-alive ─────────────
 app = Flask("")
 
@@ -43,6 +45,7 @@ threading.Thread(target=run_flask, daemon=True).start()
 # ───────────── Discord bot ─────────────
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -52,10 +55,28 @@ async def on_ready():
     if not refresh_invite.is_running():
         refresh_invite.start()
 
+# ───────────── AUTO KICK ─────────────
+@bot.event
+async def on_member_join(member):
+    if member.bot:
+        return
+
+    await asyncio.sleep(AUTO_KICK_DELAY)
+
+    if member.guild.get_member(member.id) is None:
+        return
+
+    try:
+        await member.kick(reason="Auto-kick after 5 minutes")
+        print(f"👢 Auto-kicked {member} from {member.guild.name}")
+    except discord.Forbidden:
+        print(f"❌ Missing kick permission in {member.guild.name}")
+    except Exception as e:
+        print(f"❌ Auto-kick failed: {e}")
+
 # ───────────── INVITE LOOP ─────────────
 @tasks.loop(hours=1)
 async def refresh_invite():
-    # Load previous message IDs
     data = {}
     if os.path.exists(DATA_FILE):
         try:
@@ -65,24 +86,23 @@ async def refresh_invite():
             data = {}
     message_ids = data.get("messages", {})
 
-    # Get guild and bot member
     guild = bot.get_guild(MAIN_GUILD_ID)
     if not guild:
         print("❌ Guild not found")
         return
+
     me = guild.get_member(bot.user.id)
 
-    # Find a channel where bot can create invite
     invite_channel = None
     for ch in guild.text_channels:
         if ch.permissions_for(me).create_instant_invite:
             invite_channel = ch
             break
+
     if not invite_channel:
         print("❌ No channel with invite permission")
         return
 
-    # Create a new invite (1 hour)
     try:
         invite = await invite_channel.create_invite(
             max_age=3600,
@@ -97,7 +117,6 @@ async def refresh_invite():
     new_message_ids = {}
 
     async def update_channel(ch_id):
-        """Update a single channel with retries on 429"""
         while True:
             channel = bot.get_channel(ch_id)
             if not channel:
@@ -114,8 +133,8 @@ async def refresh_invite():
                     msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
 
                 new_message_ids[str(ch_id)] = msg.id
-                await asyncio.sleep(1)  # gentle pause
-                return  # success
+                await asyncio.sleep(1)
+                return
 
             except discord.NotFound:
                 msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
@@ -127,7 +146,7 @@ async def refresh_invite():
                 if e.status == 429:
                     print(f"⏳ Rate limited in {ch_id}, retrying…")
                     await asyncio.sleep(65)
-                    continue  # retry same channel
+                    continue
                 else:
                     print(f"❌ HTTP error in {ch_id}: {e}")
                     return
@@ -136,10 +155,8 @@ async def refresh_invite():
                 print(f"❌ Unexpected error in {ch_id}: {e}")
                 return
 
-    # Update all channels in parallel
     await asyncio.gather(*(update_channel(ch_id) for ch_id in POST_CHANNEL_IDS))
 
-    # Save message IDs
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump({"messages": new_message_ids}, f, indent=2)
