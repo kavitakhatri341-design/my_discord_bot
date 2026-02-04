@@ -199,7 +199,7 @@ async def scan_servers_for_members():
                     with open(KICK_DATA_FILE, "w") as f:
                         json.dump(kick_data, f, indent=2)
                     asyncio.create_task(schedule_kick(str(member.id), guild_id, channel_id, kick_data[key]["first_join"]))
-                    await asyncio.sleep(0.05)  # tiny delay to prevent initial burst
+                    await asyncio.sleep(0.05)  # tiny delay per member
 
 # ───────────── Invite system ─────────────
 @tasks.loop(hours=1)
@@ -241,7 +241,7 @@ async def refresh_invite():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    await asyncio.sleep(3)  # startup delay to avoid 429 on first connect
+    await asyncio.sleep(5)  # startup delay to avoid initial 429
     await start_workers()
     async with kick_lock:
         for key, info in kick_data.items():
