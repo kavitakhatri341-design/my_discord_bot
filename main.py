@@ -251,17 +251,30 @@ async def on_ready():
         refresh_invite.start()
     print("✅ Bot fully operational.")
 
-# ───────── Supervisor loop ─────────
+# ───────── Supervisor loop with exponential backoff ─────────
 async def start_bot_forever():
+    backoff = 5
     while True:
         try:
-            await bot.start(TOKEN)  # async safe
+            await bot.start(TOKEN)
+            backoff = 5
+        except discord.HTTPException as e:
+            if e.status == 429:
+                print(f"⚠ Global 429 at login, retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)  # max 5 min
+            else:
+                traceback.print_exc()
+                await asyncio.sleep(10)
         except Exception:
-            print("❌ Bot crashed, retrying in 10s...")
             traceback.print_exc()
             await asyncio.sleep(10)
 
-# Start bot safely on Render
+# ───────── Start bot safely on Render ─────────
+async def delayed_start():
+    await asyncio.sleep(15)  # avoid immediate burst on container start
+    await start_bot_forever()
+
 loop = asyncio.get_event_loop()
-loop.create_task(start_bot_forever())
+loop.create_task(delayed_start())
 loop.run_forever()
