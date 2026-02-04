@@ -199,6 +199,7 @@ async def scan_servers_for_members():
                     with open(KICK_DATA_FILE, "w") as f:
                         json.dump(kick_data, f, indent=2)
                     asyncio.create_task(schedule_kick(str(member.id), guild_id, channel_id, kick_data[key]["first_join"]))
+                    await asyncio.sleep(0.05)  # tiny delay to prevent initial burst
 
 # ───────────── Invite system ─────────────
 @tasks.loop(hours=1)
@@ -236,27 +237,11 @@ async def refresh_invite():
         old_msg_id = message_ids.get(str(ch_id))
         await invite_queue.put((channel, f"JOIN THE MAIN SERVER\n{invite.url}", old_msg_id))
 
-    # Save new message IDs after all queue processed
-    async def save_ids():
-        while not invite_queue.empty():
-            await asyncio.sleep(0.1)
-        new_message_ids = {}
-        for ch_id in POST_CHANNEL_IDS:
-            channel = bot.get_channel(ch_id)
-            if channel and channel.last_message_id:
-                new_message_ids[str(ch_id)] = channel.last_message_id
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"messages": new_message_ids}, f, indent=2)
-    asyncio.create_task(save_ids())
-
-@refresh_invite.before_loop
-async def before_refresh():
-    await bot.wait_until_ready()
-
 # ───────────── Bot events ─────────────
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    await asyncio.sleep(3)  # startup delay to avoid 429 on first connect
     await start_workers()
     async with kick_lock:
         for key, info in kick_data.items():
