@@ -1,10 +1,7 @@
 import discord
 from discord.ext import commands, tasks
-import asyncio
 import json
 import os
-import threading
-from flask import Flask
 
 # ───────── CONFIG ─────────
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -26,21 +23,10 @@ POST_CHANNEL_IDS = [
 
 DATA_FILE = "invite_data.json"
 
-# ───────── Flask keep-alive ─────────
-app = Flask("")
-
-@app.route("/")
-def home():
-    return "Bot is running!"
-
-def run_flask():
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
-threading.Thread(target=run_flask, daemon=True).start()
-
 # ───────── Discord bot ─────────
 intents = discord.Intents.default()
+intents.guilds = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ───────── Invite system ─────────
