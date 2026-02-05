@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands, tasks
 import json
 import os
+import threading
+from flask import Flask
 
 # ───────── CONFIG ─────────
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -23,10 +25,22 @@ POST_CHANNEL_IDS = [
 
 DATA_FILE = "invite_data.json"
 
+# ───────── Minimal Flask for UptimeRobot ─────────
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+threading.Thread(target=run_flask, daemon=True).start()
+
 # ───────── Discord bot ─────────
 intents = discord.Intents.default()
 intents.guilds = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ───────── Invite system ─────────
@@ -64,8 +78,8 @@ async def refresh_invite():
             unique=True,
             reason="Hourly invite refresh"
         )
-    except Exception as e:
-        print(f"❌ Invite creation failed: {e}")
+    except discord.HTTPException as e:
+        print(f"⚠ Invite creation blocked: {e}")
         return
 
     for ch_id in POST_CHANNEL_IDS:
@@ -86,7 +100,7 @@ async def refresh_invite():
             msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
             message_ids[str(ch_id)] = msg.id
 
-        except Exception as e:
+        except discord.HTTPException as e:
             print(f"⚠ Failed posting invite in {ch_id}: {e}")
 
     data["messages"] = message_ids
@@ -97,6 +111,7 @@ async def refresh_invite():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    await asyncio.sleep(30)  # slow login to reduce chance of 429
     if not refresh_invite.is_running():
         refresh_invite.start()
     print("✅ Invite system active.")
