@@ -1,10 +1,10 @@
 import discord
 from discord.ext import commands, tasks
+import asyncio
 import json
 import os
-import asyncio
-from flask import Flask
 import threading
+from flask import Flask
 
 # ───────── CONFIG ─────────
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -26,7 +26,7 @@ POST_CHANNEL_IDS = [
 
 DATA_FILE = "invite_data.json"
 
-# ───────── Minimal Flask for UptimeRobot ─────────
+# ───────── Flask keep-alive ─────────
 app = Flask("")
 
 @app.route("/")
@@ -41,52 +41,7 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 # ───────── Discord bot ─────────
 intents = discord.Intents.default()
-intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# ───────── Helper: safe invite/message functions ─────────
-async def safe_create_invite(channel):
-    for attempt in range(5):
-        try:
-            return await channel.create_invite(
-                max_age=3600, max_uses=0, unique=True
-            )
-        except discord.HTTPException as e:
-            if e.status == 429:
-                retry = getattr(e, "retry_after", 5)
-                print(f"⚠ 429 rate limited, retrying invite in {retry}s...")
-                await asyncio.sleep(retry + 1)
-            else:
-                raise
-    return None
-
-async def safe_send(channel, content, old_msg_id=None):
-    if old_msg_id:
-        try:
-            msg = await channel.fetch_message(old_msg_id)
-            await msg.edit(content=content)
-            return msg
-        except discord.NotFound:
-            pass
-        except discord.HTTPException as e:
-            if e.status == 429:
-                retry = getattr(e, "retry_after", 2)
-                print(f"⚠ 429 rate limited, retrying edit in {retry}s...")
-                await asyncio.sleep(retry + 1)
-                return await safe_send(channel, content, old_msg_id)
-            else:
-                raise
-    for attempt in range(5):
-        try:
-            return await channel.send(content)
-        except discord.HTTPException as e:
-            if e.status == 429:
-                retry = getattr(e, "retry_after", 2)
-                print(f"⚠ 429 rate limited, retrying send in {retry}s...")
-                await asyncio.sleep(retry + 1)
-            else:
-                raise
-    return None
 
 # ───────── Invite system ─────────
 @tasks.loop(hours=1)
@@ -116,9 +71,15 @@ async def refresh_invite():
         print("❌ No channel with invite permission")
         return
 
-    invite = await safe_create_invite(invite_channel)
-    if not invite:
-        print("❌ Failed to create invite after retries")
+    try:
+        invite = await invite_channel.create_invite(
+            max_age=3600,
+            max_uses=0,
+            unique=True,
+            reason="Hourly invite refresh"
+        )
+    except Exception as e:
+        print(f"❌ Invite creation failed: {e}")
         return
 
     for ch_id in POST_CHANNEL_IDS:
@@ -127,28 +88,31 @@ async def refresh_invite():
             continue
 
         old_msg_id = message_ids.get(str(ch_id))
-        msg = await safe_send(channel, f"JOIN THE MAIN SERVER\n{invite.url}", old_msg_id)
-        if msg:
+        try:
+            if old_msg_id:
+                try:
+                    msg = await channel.fetch_message(old_msg_id)
+                    await msg.edit(content=f"JOIN THE MAIN SERVER\n{invite.url}")
+                    continue
+                except discord.NotFound:
+                    pass
+
+            msg = await channel.send(f"JOIN THE MAIN SERVER\n{invite.url}")
             message_ids[str(ch_id)] = msg.id
 
-        # ✅ Small delay between channels to reduce burst
-        await asyncio.sleep(2)
+        except Exception as e:
+            print(f"⚠ Failed posting invite in {ch_id}: {e}")
 
     data["messages"] = message_ids
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# ───────── on_ready with startup delay ─────────
+# ───────── on_ready ─────────
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-
-    # ✅ Delay only on startup/redeploy to avoid 429
-    await asyncio.sleep(30)  # wait 30s before sending invites
-
     if not refresh_invite.is_running():
         refresh_invite.start()
-
     print("✅ Invite system active.")
 
 # ───────── Start bot ─────────
