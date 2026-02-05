@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import json
 import os
 import threading
+import asyncio
 from flask import Flask
 
 # ───────── CONFIG ─────────
@@ -36,6 +37,7 @@ def run_flask():
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
+# Run Flask in a separate thread so bot can run simultaneously
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ───────── Discord bot ─────────
@@ -107,13 +109,17 @@ async def refresh_invite():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# ───────── on_ready ─────────
+# ───────── on_ready with startup delay ─────────
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    await asyncio.sleep(30)  # slow login to reduce chance of 429
+
+    # ✅ Delay only on startup/redeploy to avoid 429
+    await asyncio.sleep(30)  # wait 30s before sending any invite
+
     if not refresh_invite.is_running():
         refresh_invite.start()
+
     print("✅ Invite system active.")
 
 # ───────── Start bot ─────────
